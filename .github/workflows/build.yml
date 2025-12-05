@@ -55,29 +55,58 @@ jobs:
         with:
           go-version: ${{ matrix.go_version }}
 
-      - name: Cache Go build cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-          key: ${{ matrix.runner }}-go-build-${{ matrix.go_version }}-${{ hashFiles('**/go.sum') }}
-
-      # Note: we deliberately do NOT cache ~/go/pkg/mod to avoid tar extraction conflicts
-      # with runner-provided toolchain files (golang.org/toolchain). Caching the module
-      # download cache can cause 'tar: ... Cannot open: File exists' when restored.
+      # (Cache step removed — caching has caused tar extraction conflicts on runners.)
 
       - name: Download modules
         run: go mod download
+
+      - name: Setup Android NDK (for android builds)
+        if: matrix.goos == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Install Android commandline tools & NDK
+        if: matrix.goos == 'android'
+        run: |
+          set -e
+          export ANDROID_SDK_ROOT="$HOME/android-sdk"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          cd /tmp
+          curl -sSLo commandlinetools.zip https://dl.google.com/android/repository/commandlinetools-linux-9123335_latest.zip
+          unzip -q commandlinetools.zip -d cmdline-tools
+          mv cmdline-tools/cmdline-tools "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_SDK_ROOT" "ndk;25.2.9519653" "platform-tools"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+
 
       - name: Build binaries
         run: |
           set -e
           OUT_DIR=build/${{ matrix.goos }}-${{ matrix.goarch }}
           mkdir -p "$OUT_DIR"
+
           # If matrix specifies GOARM (for 32-bit ARM), export it for the build environment
           if [ -n "${{ matrix.goarm }}" ]; then
             echo "Setting GOARM=${{ matrix.goarm }}"
             export GOARM=${{ matrix.goarm }}
+          fi
+
+          # Configure CGO and CC for android builds (enable cgo and point CC to NDK clang)
+          CGO_FLAG=0
+          if [ "${{ matrix.goos }}" = "android" ]; then
+            echo "Enabling CGO for android build"
+            CGO_FLAG=1
+            # Use API level 21 for arm builds (armv7a)
+            if [ -z "$ANDROID_NDK_HOME" ]; then
+              ANDROID_NDK_HOME="$HOME/android-sdk/ndk/25.2.9519653"
+            fi
+            export ANDROID_NDK_HOME
+            export CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
+            echo "Using CC=$CC"
           fi
 
           for pkg in cmd/recv cmd/send; do
@@ -85,9 +114,7 @@ jobs:
             out="$OUT_DIR/${base}"
             if [ "${{ matrix.goos }}" = "windows" ]; then out="$out.exe"; fi
             echo "Building $pkg -> $out (GOOS=${{ matrix.goos }}, GOARCH=${{ matrix.goarch }}, runner=${{ matrix.runner }})"
-            # For darwin builds we run on macos runner; CGO disabled by default to simplify cross-builds.
-            # If your project requires cgo on darwin, set CGO_ENABLED=1 and ensure necessary tools are installed on macos runner.
-            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -ldflags "-s -w" -o "$out" "./$pkg"
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=${CGO_FLAG} go build -ldflags "-s -w" -o "$out" "./$pkg"
           done
           ls -la "$OUT_DIR"
 
