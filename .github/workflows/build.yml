@@ -9,12 +9,38 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
     strategy:
       matrix:
-        go_version: [ '1.21' ]
-        goos: [ linux, windows, darwin, android ]
-        goarch: [ amd64, arm64 ]
+        include:
+          - go_version: '1.21'
+            goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+          - go_version: '1.21'
+            goos: linux
+            goarch: arm64
+            runner: ubuntu-latest
+          - go_version: '1.21'
+            goos: windows
+            goarch: amd64
+            runner: ubuntu-latest
+          - go_version: '1.21'
+            goos: windows
+            goarch: arm64
+            runner: ubuntu-latest
+          - go_version: '1.21'
+            goos: darwin
+            goarch: amd64
+            runner: macos-latest
+          - go_version: '1.21'
+            goos: darwin
+            goarch: arm64
+            runner: macos-latest
+          - go_version: '1.21'
+            goos: android
+            goarch: arm64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,7 +56,7 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ matrix.go_version }}-${{ hashFiles('**/go.sum') }}
+          key: ${{ matrix.runner }}-go-${{ matrix.go_version }}-${{ hashFiles('**/go.sum') }}
 
       - name: Download modules
         run: go mod download
@@ -44,7 +70,9 @@ jobs:
             base=$(basename "$pkg")
             out="$OUT_DIR/${base}"
             if [ "${{ matrix.goos }}" = "windows" ]; then out="$out.exe"; fi
-            echo "Building $pkg -> $out (GOOS=${{ matrix.goos }}, GOARCH=${{ matrix.goarch }})"
+            echo "Building $pkg -> $out (GOOS=${{ matrix.goos }}, GOARCH=${{ matrix.goarch }}, runner=${{ matrix.runner }})"
+            # For darwin builds we run on macos runner; CGO disabled by default to simplify cross-builds.
+            # If your project requires cgo on darwin, set CGO_ENABLED=1 and ensure necessary tools are installed on macos runner.
             GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -ldflags "-s -w" -o "$out" "./$pkg"
           done
           ls -la "$OUT_DIR"
