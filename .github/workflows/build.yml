@@ -40,6 +40,11 @@ jobs:
             goos: android
             goarch: arm64
             runner: ubuntu-latest
+          - go_version: '1.21'
+            goos: android
+            goarch: arm
+            goarm: '7'
+            runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
@@ -66,6 +71,12 @@ jobs:
           set -e
           OUT_DIR=build/${{ matrix.goos }}-${{ matrix.goarch }}
           mkdir -p "$OUT_DIR"
+          # If matrix specifies GOARM (for 32-bit ARM), export it for the build environment
+          if [ -n "${{ matrix.goarm }}" ]; then
+            echo "Setting GOARM=${{ matrix.goarm }}"
+            export GOARM=${{ matrix.goarm }}
+          fi
+
           for pkg in cmd/recv cmd/send; do
             base=$(basename "$pkg")
             out="$OUT_DIR/${base}"
