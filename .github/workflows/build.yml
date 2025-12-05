@@ -101,12 +101,24 @@ jobs:
             echo "Enabling CGO for android build"
             CGO_FLAG=1
             # Use API level 21 for arm builds (armv7a)
-            if [ -z "$ANDROID_NDK_HOME" ]; then
-              ANDROID_NDK_HOME="$HOME/android-sdk/ndk/25.2.9519653"
-            fi
-            export ANDROID_NDK_HOME
-            export CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
-            echo "Using CC=$CC"
+              if [ -z "$ANDROID_NDK_HOME" ]; then
+                ANDROID_NDK_HOME="$HOME/android-sdk/ndk/25.2.9519653"
+              fi
+              export ANDROID_NDK_HOME
+              # Select appropriate clang wrapper from NDK based on GOARCH
+              case "${{ matrix.goarch }}" in
+                arm)
+                  export CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
+                  ;;
+                arm64)
+                  export CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+                  ;;
+                *)
+                  echo "Unsupported android GOARCH: ${{ matrix.goarch }}"
+                  exit 1
+                  ;;
+              esac
+              echo "Using CC=$CC"
           fi
 
           for pkg in cmd/recv cmd/send; do
@@ -117,6 +129,21 @@ jobs:
             GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=${CGO_FLAG} go build -ldflags "-s -w" -o "$out" "./$pkg"
           done
           ls -la "$OUT_DIR"
+
+      - name: Ad-hoc codesign (darwin)
+        if: matrix.goos == 'darwin'
+        run: |
+          set -e
+          OUT_DIR=build/${{ matrix.goos }}-${{ matrix.goarch }}
+          echo "Signing all files in $OUT_DIR"
+          for f in "$OUT_DIR"/*; do
+            if [ -f "$f" ]; then
+              echo "codesign $f"
+              codesign --sign - --force --timestamp=none "$f"
+              echo "verify $f"
+              codesign --verify --verbose=2 "$f" || true
+            fi
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
