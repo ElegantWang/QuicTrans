@@ -1,0 +1,56 @@
+name: Cross-platform Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go_version: [ '1.21' ]
+        goos: [ linux, windows, darwin, android ]
+        goarch: [ amd64, arm64 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ matrix.go_version }}
+
+      - name: Cache Go modules and build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.go_version }}-${{ hashFiles('**/go.sum') }}
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Build binaries
+        run: |
+          set -e
+          OUT_DIR=build/${{ matrix.goos }}-${{ matrix.goarch }}
+          mkdir -p "$OUT_DIR"
+          for pkg in cmd/recv cmd/send; do
+            base=$(basename "$pkg")
+            out="$OUT_DIR/${base}"
+            if [ "${{ matrix.goos }}" = "windows" ]; then out="$out.exe"; fi
+            echo "Building $pkg -> $out (GOOS=${{ matrix.goos }}, GOARCH=${{ matrix.goarch }})"
+            GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 go build -ldflags "-s -w" -o "$out" "./$pkg"
+          done
+          ls -la "$OUT_DIR"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: quictrans-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: build/${{ matrix.goos }}-${{ matrix.goarch }}
