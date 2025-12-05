@@ -1,0 +1,28 @@
+# Binaries
+/bin/
+
+# Receiver output and generated certs
+/recv_out/
+/server_cert.pem
+/server_key.pem
+
+# Logs and temp
+*.log
+
+# Editor / OS files
+.DS_Store
+.vscode/
+.idea/
+*~
+*.swp
+
+# Go
+vendor/
+*.test
+
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
