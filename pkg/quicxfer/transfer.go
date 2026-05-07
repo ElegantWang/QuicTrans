@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,16 @@ type FileMeta struct {
 	Name string      `json:"name"`
 	Size int64       `json:"size"`
 	Mode os.FileMode `json:"mode"`
+}
+
+type PullRequest struct {
+	Path string `json:"path"`
+}
+
+type PullResponse struct {
+	OK    bool     `json:"ok"`
+	Error string   `json:"error,omitempty"`
+	Meta  FileMeta `json:"meta,omitempty"`
 }
 
 func GenerateSelfSignedTLS() (*tls.Config, string, error) {
@@ -69,6 +80,236 @@ func GenerateSelfSignedTLS() (*tls.Config, string, error) {
 	fp := hex.EncodeToString(sum[:])
 
 	return conf, fp, nil
+}
+
+func writeJSONFrame(w io.Writer, v any) error {
+	payload, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	if len(payload) > int(^uint32(0)) {
+		return errors.New("json frame too large")
+	}
+
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(payload)))
+	if _, err := w.Write(lenBuf[:]); err != nil {
+		return err
+	}
+	_, err = w.Write(payload)
+	return err
+}
+
+func readJSONFrame(r io.Reader, v any) error {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+		return err
+	}
+	frameLen := binary.BigEndian.Uint32(lenBuf[:])
+	if frameLen == 0 {
+		return errors.New("empty json frame")
+	}
+
+	payload := make([]byte, frameLen)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return err
+	}
+	return json.Unmarshal(payload, v)
+}
+
+func ResolveRemotePath(root, remotePath string) (string, error) {
+	if root == "" {
+		return "", errors.New("root directory required")
+	}
+	if remotePath == "" {
+		return "", errors.New("remote path required")
+	}
+	if filepath.IsAbs(remotePath) {
+		return "", fmt.Errorf("absolute remote paths are not allowed: %s", remotePath)
+	}
+
+	cleanRemote := filepath.Clean(remotePath)
+	if cleanRemote == "." || cleanRemote == ".." || strings.HasPrefix(cleanRemote, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("remote path escapes root: %s", remotePath)
+	}
+
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	absCandidate, err := filepath.Abs(filepath.Join(absRoot, cleanRemote))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absRoot, absCandidate)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("remote path escapes root: %s", remotePath)
+	}
+	return absCandidate, nil
+}
+
+func RunFileServer(ctx context.Context, addr string, tlsConf *tls.Config, rootDir string) error {
+	if tlsConf == nil {
+		return errors.New("tls config required")
+	}
+	if rootDir == "" {
+		return errors.New("root directory required")
+	}
+
+	listener, err := quic.ListenAddr(addr, tlsConf, nil)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	for {
+		session, err := listener.Accept(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			fmt.Fprintf(os.Stderr, "accept session error: %v\n", err)
+			continue
+		}
+
+		go func() {
+			defer session.CloseWithError(0, "session done")
+			for {
+				stream, err := session.AcceptStream(ctx)
+				if err != nil {
+					return
+				}
+				go handlePullStream(stream, rootDir)
+			}
+		}()
+	}
+}
+
+func handlePullStream(stream *quic.Stream, rootDir string) {
+	defer stream.Close()
+
+	var req PullRequest
+	if err := readJSONFrame(stream, &req); err != nil {
+		_ = writeJSONFrame(stream, PullResponse{OK: false, Error: err.Error()})
+		return
+	}
+
+	localPath, err := ResolveRemotePath(rootDir, req.Path)
+	if err != nil {
+		_ = writeJSONFrame(stream, PullResponse{OK: false, Error: err.Error()})
+		return
+	}
+
+	fi, err := os.Stat(localPath)
+	if err != nil {
+		_ = writeJSONFrame(stream, PullResponse{OK: false, Error: err.Error()})
+		return
+	}
+	if fi.IsDir() {
+		_ = writeJSONFrame(stream, PullResponse{OK: false, Error: "remote path is a directory"})
+		return
+	}
+
+	f, err := os.Open(localPath)
+	if err != nil {
+		_ = writeJSONFrame(stream, PullResponse{OK: false, Error: err.Error()})
+		return
+	}
+	defer f.Close()
+
+	resp := PullResponse{
+		OK: true,
+		Meta: FileMeta{
+			Name: filepath.Base(localPath),
+			Size: fi.Size(),
+			Mode: fi.Mode(),
+		},
+	}
+	if err := writeJSONFrame(stream, resp); err != nil {
+		return
+	}
+	if _, err := io.Copy(stream, f); err != nil {
+		fmt.Fprintf(os.Stderr, "send pulled file error: %v\n", err)
+	}
+}
+
+func PullFile(ctx context.Context, addr string, tlsConf *tls.Config, remotePath, outDir string) (string, error) {
+	if tlsConf == nil {
+		return "", errors.New("tls config required")
+	}
+	if remotePath == "" {
+		return "", errors.New("remote path required")
+	}
+	if outDir == "" {
+		outDir = "."
+	}
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return "", err
+	}
+
+	clientTLS := tlsConf.Clone()
+	clientTLS.NextProtos = []string{"quic-file-xfer"}
+
+	session, err := quic.DialAddr(ctx, addr, clientTLS, nil)
+	if err != nil {
+		return "", err
+	}
+	defer session.CloseWithError(0, "client done")
+
+	stream, err := session.OpenStreamSync(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+
+	if err := writeJSONFrame(stream, PullRequest{Path: remotePath}); err != nil {
+		return "", err
+	}
+
+	var resp PullResponse
+	if err := readJSONFrame(stream, &resp); err != nil {
+		return "", err
+	}
+	if !resp.OK {
+		if resp.Error == "" {
+			resp.Error = "server rejected pull request"
+		}
+		return "", errors.New(resp.Error)
+	}
+
+	name := filepath.Base(resp.Meta.Name)
+	if name == "." || name == string(filepath.Separator) {
+		name = filepath.Base(remotePath)
+	}
+	outPath := filepath.Join(outDir, name)
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		return "", err
+	}
+	defer outFile.Close()
+
+	var copied int64
+	if resp.Meta.Size > 0 {
+		bar := pb.Full.Start64(resp.Meta.Size)
+		defer bar.Finish()
+		pw := bar.NewProxyWriter(outFile)
+		copied, err = io.CopyN(pw, stream, resp.Meta.Size)
+	} else {
+		copied, err = io.Copy(outFile, stream)
+	}
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	if resp.Meta.Size > 0 && copied != resp.Meta.Size {
+		return "", fmt.Errorf("short download: got %d bytes, expected %d", copied, resp.Meta.Size)
+	}
+	if err := outFile.Chmod(resp.Meta.Mode); err != nil {
+		// ignore on platforms that do not support chmod
+	}
+	return outPath, nil
 }
 
 // SendFile dials addr and sends one file. tlsConf is the client TLS config (may set InsecureSkipVerify).

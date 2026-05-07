@@ -14,6 +14,8 @@ Prototype CLI tool to send/receive files over QUIC using `quic-go`.
 go mod tidy
 go build -o bin/recv ./cmd/recv
 go build -o bin/send ./cmd/send
+go build -o bin/serve ./cmd/serve
+go build -o bin/pull ./cmd/pull
 ```
 
 ## Run (local test)
@@ -49,3 +51,24 @@ The `send` CLI supports sending multiple files in one command. Example:
 ```
 
 Each file will be sent on its own QUIC stream concurrently (up to the `--parallel` limit). Use `--fingerprint` to validate the server certificate instead of `--insecure`.
+
+## Pull from a remote server
+
+Use this mode when the client machine has no public IP. Run the file server on
+the remote machine, then pull from the local machine by connecting out to the
+server.
+
+On the remote server:
+
+```bash
+./bin/serve --listen :4242 --root /remote/files
+```
+
+On the local machine:
+
+```bash
+./bin/pull --addr 104.168.117.239:4242 --remote release/file.zip --out ./downloads --insecure
+```
+
+`--remote` is a path relative to the server `--root`. The server rejects
+absolute paths and parent-directory traversal such as `../secret`.
